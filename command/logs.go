@@ -1,7 +1,9 @@
 package command
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -90,23 +92,45 @@ func NewCmdLogs() *cobra.Command {
 			wg := &sync.WaitGroup{}
 			for _, pod := range pods.Items {
 				for _, container := range pod.Containers {
+					str := fmt.Sprintf("kubectl logs %s %s", pod.Name, fg)
+					if o.Container == "" {
+						str += fmt.Sprintf(" --container %s", container.Name)
+					}
+					logrus.Infoln(fmt.Sprintf("%s %s", pod.Name, container.Name))
+					logrus.Debugln(str)
+
 					wg.Add(1)
-					go func(pod *Pod, container *Container) {
+					go func(str string) {
 						defer wg.Done()
 
-						str := fmt.Sprintf("kubectl logs %s %s", pod.Name, fg)
-						if o.Container == "" {
-							str += fmt.Sprintf(" --container %s", container.Name)
-						}
-						logrus.Debugln(str)
+						prefix := fmt.Sprintf("[%s %s]", pod.Name, container.Name)
 
 						command := exec.Command("bash", "-c", str)
-						command.Stdout = os.Stdout
-						command.Stderr = os.Stderr
-						if err := command.Run(); err != nil {
+						stdout, err := command.StdoutPipe()
+						if err != nil {
 							logrus.Errorln(err)
+							return
 						}
-					}(pod, container)
+						if err := command.Start(); err != nil {
+							logrus.Errorln(err)
+							return
+						}
+
+						reader := bufio.NewReader(stdout)
+
+						for {
+							line, err := reader.ReadString('\n')
+							if err != nil || io.EOF == err {
+								break
+							}
+							logrus.Info(prefix + line)
+						}
+
+						if err := command.Wait(); err != nil {
+							logrus.Errorln(err)
+							return
+						}
+					}(str)
 				}
 			}
 

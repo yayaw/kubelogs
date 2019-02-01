@@ -99,11 +99,11 @@ func NewCmdLogs() *cobra.Command {
 					logrus.Infoln(fmt.Sprintf("%s %s", pod.Name, container.Name))
 					logrus.Debugln(str)
 
-					wg.Add(1)
-					go func(str string) {
-						defer wg.Done()
+					prefix := fmt.Sprintf("[%s %s]", pod.Name, container.Name)
 
-						prefix := fmt.Sprintf("[%s %s]", pod.Name, container.Name)
+					wg.Add(1)
+					go func(str, prefix string) {
+						defer wg.Done()
 
 						command := exec.Command("bash", "-c", str)
 						stdout, err := command.StdoutPipe()
@@ -111,26 +111,48 @@ func NewCmdLogs() *cobra.Command {
 							logrus.Errorln(err)
 							return
 						}
+						stderr, err := command.StderrPipe()
+						if err != nil {
+							logrus.Errorln(err)
+							return
+						}
+
 						if err := command.Start(); err != nil {
 							logrus.Errorln(err)
 							return
 						}
 
-						reader := bufio.NewReader(stdout)
+						go func() {
+							reader := bufio.NewReader(stdout)
 
-						for {
-							line, err := reader.ReadString('\n')
-							if err != nil || io.EOF == err {
-								break
+							for {
+								line, err := reader.ReadString('\n')
+								if err != nil || io.EOF == err {
+									break
+								}
+								logrus.Infoln(prefix + line)
 							}
-							logrus.Info(prefix + line)
-						}
+						}()
+
+						go func() {
+							reader := bufio.NewReader(stderr)
+
+							for {
+								line, err := reader.ReadString('\n')
+								if err != nil || io.EOF == err {
+									break
+								}
+								logrus.Infoln(prefix + line)
+							}
+						}()
 
 						if err := command.Wait(); err != nil {
 							logrus.Errorln(err)
 							return
 						}
-					}(str)
+
+						logrus.Infoln(prefix + "exit")
+					}(str, prefix)
 				}
 			}
 
@@ -153,7 +175,7 @@ func NewCmdLogs() *cobra.Command {
 	return cmd
 }
 
-func cmdGetPods(podRegexp, cRegexp, namespace string) (pods *Pods, err error) {
+func cmdGetPods(podRegexp, cName, namespace string) (pods *Pods, err error) {
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`kubectl get pod -n %s --output=jsonpath="{range .items[*]}{.metadata.name} {.spec['containers', 'initContainers'][*].name}|{end}"`, namespace))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -161,11 +183,6 @@ func cmdGetPods(podRegexp, cRegexp, namespace string) (pods *Pods, err error) {
 	}
 
 	pr, err := regexp.Compile(podRegexp)
-	if err != nil {
-		logrus.Fatalln(err)
-	}
-
-	cr, err := regexp.Compile(cRegexp)
 	if err != nil {
 		logrus.Fatalln(err)
 	}
@@ -184,7 +201,7 @@ func cmdGetPods(podRegexp, cRegexp, namespace string) (pods *Pods, err error) {
 			Containers: make([]*Container, 0, len(cs[1:])),
 		}
 		for _, c := range cs[1:] {
-			if !cr.MatchString(c) {
+			if cName != "" && cName != c {
 				continue
 			}
 			pod.Containers = append(pod.Containers, &Container{
